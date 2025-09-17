@@ -1,0 +1,129 @@
+---
+title: "svmBis"
+output: html_document
+date: "2025-09-17"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1)Packages et chargement données \`
+
+```{r}
+#install.packages("recipes", type = "binary") #install.packages("tidymodels", type = "binary", dependencies = TRUE)
+
+#install.packages("caret") library(recipes) library(caret) library(ROCR) library(tidyverse)
+#install.packages("caret")
+library(recipes)
+library(caret)
+library(ROCR)
+library(tidyverse)
+
+
+data <- read.csv("C:/Users/laasi/OneDrive/Bureau/MIASHS/MASTER/m1/projet_farms/data/farms_train.csv") 
+data_test <- read.csv("C:/Users/laasi/OneDrive/Bureau/MIASHS/MASTER/m1/projet_farms/data/farms_test.csv") 
+```
+
+2)
+
+```{r}
+# Convertir la cible DIFF en facteur 
+data$DIFF <- as.factor(data$DIFF)
+
+#echantillon aléatoire pour les données d'entrainement
+n <- nrow(data)
+index_entrainement <- sample(1:n, size = 0.7 * n)
+
+data_entrainement <- data[index_entrainement, ]
+data_validation   <- data[-index_entrainement, ]
+
+
+```
+
+Modèles svm qu'on va tester
+
+```{r}
+models <- list(
+  svmLinear = list(
+    method = "svmLinear",
+    tuneGrid = expand.grid(C = c(0.01, 0.1, 1, 10))
+  ),
+  svmRadial = list(
+    method = "svmRadial",
+    tuneGrid = expand.grid(C = c(0.1, 1, 10), sigma = c(0.01, 0.05, 0.1))
+  ),
+  svmPoly = list(
+    method = "svmPoly",
+    tuneGrid = expand.grid(C = c(0.1, 1), degree = c(2, 3), scale = c(0.1, 0.5))
+  )
+)
+
+#Validation croisée : on separe les donnees en 5 parties:4pour enteaîner et la derniere pour tester et choisir les parametres
+ctrl <- trainControl(method = "cv", number = 5,
+                     classProbs = TRUE, summaryFunction = twoClassSummary)
+
+
+# Pour caret, il faut que les labels soient "0" et "1" sous forme de factor
+levels(data$DIFF) <- c("Non", "Oui")  # 0=(=non=defaillant)  et 1=(=oui=sain) 
+levels(data_entrainement$DIFF) <- c("Non", "Oui")
+levels(data_validation$DIFF) <- c("Non", "Oui")
+
+# Entraînement des modèles
+results <- list()
+for (model_name in names(models)) {
+  model <- models[[model_name]]
+  cat("Training model:", model_name, "\n")
+  results[[model_name]] <- suppressWarnings(
+    train(DIFF ~ ., 
+          data = data_entrainement,
+          method = model$method,
+          trControl = ctrl,
+          tuneGrid = model$tuneGrid,#teste les différentes valeurs d'hyperparamètres définies pour chaque modèle
+          metric = "ROC")
+  )
+}
+
+# Comparer les AUC
+resamples_res <- resamples(results)
+summary(resamples_res)
+#On voit que svmRadial a la meuilleure auc moyenne mais elle n'est pas loin devant non plus.
+#pour la sensibilité,c aussi svmRadial(0.826) qui detecte mieux les positifs (0.768 pour svmLinear et 0.813 pour svmPoly)
+#pour la specificité,linear et poly sont mieux que radial
+#on veut juste predire si une exploitation est saine ou non donc on garde poly car elle a aussi un meilleur score pour la sensibilté.
+
+# modele poly
+meilleur_modele <- results$svmPoly
+print(meilleur_modele)
+
+# Évaluer sur les données de validation
+pred_probs_val <- predict(best_model, newdata = data_validation, type = "prob")[,2]
+pred_class_val <- ifelse(pred_probs_val > 0.5, "Oui", "Non")
+
+# Matrice de confusion
+c<-confusionMatrix(factor(pred_class_val, levels=c("Non","Oui")), data_validation$DIFF)
+c
+#on obtient 12/121 faux positifs et 13/121 faux negatifs
+
+
+# Courbe ROC et AUC
+pred_v <- prediction(pred_probs_val, data_validation$DIFF)
+perf_v <- performance(pred_v, "tpr", "fpr")
+plot(perf_v, col="blue", lwd=2, main="Courbe ROC - SVM radial")
+abline(a=0, b=1, col="red", lty=2)
+auc_val <- performance(pred_v, "auc")@y.values[[1]]
+cat("AUC validation =", auc_val, "\n")
+#on obtien une AUC de 0.8813048, ce qui bien car elle se rapproche plus de 1 que 0.5.
+
+#Prédictions sur les données test
+pred_probs_test <- predict(best_model, newdata = data_test, type = "prob")[,2]
+pred_class_test <- ifelse(pred_probs_test > 0.5, 1, 0)
+
+#soumission
+submission <- data.frame(ID = 1:nrow(data_test), Target = pred_class_test)
+write.csv(submission, "C:/Users/laasi/OneDrive/Bureau/MIASHS/MASTER/m1/projet_farms/submission_svm.csv", row.names = FALSE)
+
+```
